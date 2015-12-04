@@ -16,7 +16,6 @@
 # DEPENDENCIES:
 #   gem: aws-sdk
 #   gem: sensu-plugin
-#   gem: sensu-plugins-aws
 #
 # USAGE:
 #   #YELLOW
@@ -30,20 +29,20 @@
 #
 
 require 'sensu-plugin/check/cli'
-require 'sensu-plugins-aws'
-require 'aws-sdk'
+require 'aws/ses'
 
 class CheckSESLimit < Sensu::Plugin::Check::CLI
-  include Common
   option :aws_access_key,
          short: '-a AWS_ACCESS_KEY',
          long: '--aws-access-key AWS_ACCESS_KEY',
-         description: 'AWS Access Key ID.'
+         description: "AWS Access Key. Either set ENV['AWS_ACCESS_KEY'] or provide it as an option",
+         default: ENV['AWS_ACCESS_KEY']
 
   option :aws_secret_access_key,
          short: '-k AWS_SECRET_KEY',
          long: '--aws-secret-access-key AWS_SECRET_KEY',
-         description: 'AWS Secret Access Key.'
+         description: "AWS Secret Access Key. Either set ENV['AWS_SECRET_KEY'] or provide it as an option",
+         default: ENV['AWS_SECRET_KEY']
 
   option :aws_region,
          short: '-r AWS_REGION',
@@ -65,25 +64,33 @@ class CheckSESLimit < Sensu::Plugin::Check::CLI
          default: 90,
          proc: proc(&:to_i)
 
+  def aws_config
+    { access_key_id: config[:aws_access_key],
+      secret_access_key: config[:aws_secret_access_key],
+      region: config[:aws_region]
+    }
+  end
+
   def run
     begin
-      ses = Aws::SES::Client.new
-      response = ses.get_send_quota
-    rescue => e
-      unknown "An issue occured while communicating with the AWS SES API: #{e.message}"
+      ses = AWS::SES::Base.new aws_config
+
+      response = ses.quota
+    rescue AWS::SES::ResponseError => e
+      critical "An issue occured while communicating with the AWS SES API: #{e.message}"
     end
 
-    unknown 'Empty response from AWS SES API' if response.empty? # Can this happen?
+    unless response.empty? # rubocop: disable Style/GuardClause
+      percent = (response.sent_last_24_hours.to_i / response.max_24_hour_send.to_i) * 100
+      message = "SES sending limit is at #{percent}%"
 
-    percent = (response.sent_last_24_hours.to_i / response.max_24_hour_send.to_i) * 100
-    message = "SES sending limit is at #{percent}%"
-
-    if config[:crit_percent] > 0 && config[:crit_percent] <= percent
-      critical message
-    elsif config[:warn_percent] > 0 && config[:warn_percent] <= percent
-      warning message
-    else
-      ok message
+      if config[:crit_percent] > 0 && config[:crit_percent] <= percent
+        critical message
+      elsif config[:warn_percent] > 0 && config[:warn_percent] <= percent
+        warning message
+      else
+        ok message
+      end
     end
   end
 end
